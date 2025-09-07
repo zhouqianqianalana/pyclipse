@@ -10,3 +10,4 @@ This repository is designed to generate all the input files needed for running r
 ![image](https://github.com/user-attachments/assets/0a87241e-599c-4fd8-b3c0-cdab0f33dcc1)
 ![image](https://github.com/user-attachments/assets/8b672e7e-d91f-449f-a21d-9ad031cefb2c)
 
+The example scripts can be found in examples directory
