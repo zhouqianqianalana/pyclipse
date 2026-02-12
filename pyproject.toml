@@ -1,0 +1,9 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyclipse"
+version = "0.0.1"
+description = "An automated Python-Eclipse package for static model construction, simulation execution, and result analysis"
