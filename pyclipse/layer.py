@@ -2,6 +2,8 @@ from pyclipse.write_eclipse import Writer
 import numpy as np
 from scipy.ndimage import gaussian_filter
 from scipy.stats import multivariate_normal
+from pathlib import Path
+import json
 
 class Layer:
 
@@ -143,6 +145,16 @@ class LobeLayer(Layer):
         self.poro_mat = self.poro_mat*self.active
         self.perm_mat = (10**self.perm_mat)*self.active
 
+            # Store facies map for later use (swap axes to match xyz convention)
+        if allfacies and len(allfacies) > 0:
+            self.facies = np.swapaxes(allfacies[-1].copy(), 0, -1).astype(int)
+        else:
+            self.facies = None
+
+        # Optionally select actual geological lobes and boost their porosity as "sweet" lobes
+        if n_sweet and n_sweet > 0:
+            self.select_and_boost_sweet_lobes(n=n_sweet, amp_min=sweet_amp_min, amp_max=sweet_amp_max)
+
 
     def lobemodeling(self, dhmax=4, dhmin=4, rmin=42, rmax=44, asp=1.5, theta0=0, m=100, upthinning = True, bouma_factor = 0):
 
@@ -214,6 +226,76 @@ class LobeLayer(Layer):
                 break
         return allfacies, allporo, allsurface
 
+    def select_and_boost_sweet_lobes(self, n=5, amp_min=0.10, amp_max=0.15):
+        """
+        Randomly select n geological lobes and increase their porosity to make them "sweet".
+        
+        This method:
+        1. Identifies all unique lobe IDs in the facies array (excluding 0, which is background)
+        2. Randomly selects n lobes
+        3. Boosts porosity within each selected lobe by a random amount
+        4. Records metadata including lobe ID, voxel locations, and boost amount
+        
+        Parameters
+        - n: number of lobes to select and boost (int)
+        - amp_min, amp_max: porosity increase range (float)
+        
+        Effects
+        - updates self.poro_mat in-place (adds amplitude to all cells in selected lobes)
+        - creates self.sweet_mask (bool array marking boosted cells)
+        - creates self.sweet_metadata (list of dicts with lobe_id, boost amount, voxel_coords)
+        
+        Requires
+        - self.facies to be populated (run create_geology() first)
+        - self.poro_mat to exist
+        """
+        if not hasattr(self, 'facies') or self.facies is None:
+            raise AttributeError('facies map not found; run create_geology() first')
+        if not hasattr(self, 'poro_mat'):
+            raise AttributeError('poro_mat not found; run create_geology() first')
+        
+        # Find all unique lobe IDs (excluding 0 = background/non-sand)
+        lobe_ids = np.unique(self.facies)
+        lobe_ids = lobe_ids[lobe_ids > 0]  # keep only active lobe IDs
+        
+        if len(lobe_ids) < n:
+            raise ValueError(f'Only {len(lobe_ids)} lobes available, but requested to boost {n}')
+        
+        # Randomly select n lobes
+        selected_lobes = np.random.choice(lobe_ids, size=int(n), replace=False)
+        
+        # Initialize tracking structures
+        self.sweet_mask = np.zeros_like(self.poro_mat, dtype=bool)
+        self.sweet_metadata = []
+        
+        # Boost porosity in each selected lobe
+        for lobe_id in selected_lobes:
+            # Create mask for this lobe
+            lobe_mask = (self.facies == lobe_id)
+            
+            # Random sample boost amplitude
+            amp = float(np.random.uniform(amp_min, amp_max))
+            
+            # Apply boost to porosity
+            self.poro_mat[lobe_mask] += amp
+            
+            # Update sweet mask
+            self.sweet_mask = self.sweet_mask | lobe_mask
+            
+            # Get voxel coordinates (i, j, k) for all cells in this lobe
+            voxel_coords = np.argwhere(lobe_mask)  # Returns (nx, ny, nz) indices as Nx3 array
+            
+            # Record metadata
+            metadata = {
+                'lobe_id': int(lobe_id),
+                'boost_amount': float(amp),
+                'cell_count': int(np.sum(lobe_mask)),
+                'voxel_coords': voxel_coords.tolist()  # Convert to list for JSON serialization
+            }
+            self.sweet_metadata.append(metadata)
+        
+        # Clamp porosity to valid range [0, 0.9]
+        self.poro_mat = np.clip(self.poro_mat, 0.0, 0.9)
 
     def update_surface(self, x, y, r, asp, theta, dh, surface):
         for ii in np.arange(max(0,int(y-r*asp)), min(int(y+r*asp), self.ny)):
@@ -293,3 +375,45 @@ class LobeLayer(Layer):
             self.x_len = prop_value
         elif prop_name == 'y_length' or prop_name == 'y_len':
             self.y_len = prop_value
+
+    def export_sweet_metadata(self, dirpath, prefix='sweet', save_mask=True, save_metadata=True):
+        """
+        Export sweet-lobe mask and metadata to disk.
+
+        Parameters
+        - dirpath: directory path (str or Path) where files will be written
+        - prefix: filename prefix
+        - save_mask: if True, saves mask as <prefix>_mask.npy
+        - save_metadata: if True, saves metadata as <prefix>_metadata.json
+
+        Returns a dict with paths written.
+        """
+        if not hasattr(self, 'sweet_mask') or not hasattr(self, 'sweet_metadata'):
+            raise AttributeError('No sweet metadata found. Run inject_sweet_lobes() first.')
+
+        out = {}
+        p = Path(dirpath)
+        p.mkdir(parents=True, exist_ok=True)
+
+        if save_mask:
+            mask_path = p / f"{prefix}_mask.npy"
+            np.save(str(mask_path), self.sweet_mask)
+            out['mask'] = str(mask_path)
+
+        if save_metadata:
+            meta_path = p / f"{prefix}_metadata.json"
+            # Convert any non-JSON native types (tuples) to lists inside metadata
+            serializable = []
+            for m in self.sweet_metadata:
+                mm = m.copy()
+                # convert tuples to lists for JSON safety
+                if 'center_idx' in mm and isinstance(mm['center_idx'], tuple):
+                    mm['center_idx'] = list(mm['center_idx'])
+                if 'bbox' in mm and isinstance(mm['bbox'], tuple):
+                    mm['bbox'] = list(mm['bbox'])
+                serializable.append(mm)
+            with open(str(meta_path), 'w') as fh:
+                json.dump(serializable, fh, indent=2)
+            out['metadata'] = str(meta_path)
+
+        return out
